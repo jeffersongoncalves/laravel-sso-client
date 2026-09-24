@@ -45,6 +45,8 @@ class SsoClientManager
 
     public const SESSION_AUTHENTICATED_AT = 'sso-client.authenticated_at';
 
+    public const SESSION_ACCESS_TOKEN = 'sso-client.access_token';
+
     public function __construct(
         protected ConfigRepository $config,
         protected CacheRepository $cache,
@@ -101,7 +103,8 @@ class SsoClientManager
             throw new SsoClientException('Missing authorization code.');
         }
 
-        $claims = $this->exchangeCode($code, $verifier);
+        $token = $this->requestAccessToken($code, $verifier);
+        $claims = $this->resolveClaims($token);
 
         $user = $this->synchronizer->synchronize($claims);
 
@@ -110,10 +113,12 @@ class SsoClientManager
         $this->guard()->login($user);
         $session->regenerate();
 
-        // Lets a later Single Logout webhook (keyed by "sub") revoke this session.
         $session->put([
+            // Lets a later Single Logout webhook (keyed by "sub") revoke this session.
             self::SESSION_SUB => $claims['sub'],
             self::SESSION_AUTHENTICATED_AT => microtime(true),
+            // token_hint for client-initiated logout (expired tokens are accepted).
+            self::SESSION_ACCESS_TOKEN => $token,
         ]);
 
         return $user;
@@ -128,6 +133,45 @@ class SsoClientManager
      * @throws SsoClientException
      */
     public function exchangeCode(string $code, string $codeVerifier): array
+    {
+        return $this->resolveClaims($this->requestAccessToken($code, $codeVerifier));
+    }
+
+    /**
+     * Server URL that ends the user's SSO session (RP-initiated logout,
+     * laravel-sso-server 1.1+). The browser must be redirected there after
+     * the local session is destroyed.
+     */
+    public function logoutUrl(string $accessToken): string
+    {
+        return $this->endpoint('logout').'?'.http_build_query([
+            'client_id' => $this->clientId(),
+            'token_hint' => $accessToken,
+            'post_logout_redirect_uri' => $this->postLogoutRedirectUri(),
+        ]);
+    }
+
+    public function postLogoutRedirectUri(): string
+    {
+        return (string) ($this->config->get('sso-client.post_logout_redirect_uri') ?: url((string) $this->config->get('sso-client.home', '/')));
+    }
+
+    /**
+     * @return array<string, mixed>
+     *
+     * @throws SsoClientException
+     */
+    protected function resolveClaims(string $token): array
+    {
+        return $this->config->get('sso-client.verification') === 'userinfo'
+            ? $this->fetchUserInfo($token)
+            : $this->verifyAccessToken($token);
+    }
+
+    /**
+     * @throws SsoClientException
+     */
+    protected function requestAccessToken(string $code, string $codeVerifier): string
     {
         $response = $this->send(fn (PendingRequest $http): Response => $http->asForm()->post($this->endpoint('token'), [
             'grant_type' => 'authorization_code',
@@ -153,9 +197,7 @@ class SsoClientManager
             throw new SsoClientException('SSO token response has no "access_token".');
         }
 
-        return $this->config->get('sso-client.verification') === 'userinfo'
-            ? $this->fetchUserInfo($token)
-            : $this->verifyAccessToken($token);
+        return $token;
     }
 
     /**

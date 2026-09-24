@@ -37,7 +37,13 @@ return [
         'token' => '/sso/token',
         'userinfo' => '/sso/userinfo',
         'jwks' => '/.well-known/jwks.json',
+        // Client-initiated logout (laravel-sso-server 1.1+).
+        'logout' => '/sso/logout',
     ],
+
+    // Where the server sends the browser after POST /sso/logout. Must have the
+    // same origin as redirect_uri. Null uses the "home" URL below.
+    'post_logout_redirect_uri' => env('SSO_POST_LOGOUT_REDIRECT_URI'),
 
     /*
     |--------------------------------------------------------------------------
@@ -90,8 +96,10 @@ return [
         'email_column' => 'email',
 
         // An SSO login whose email belongs to an existing local account that
-        // was never linked is rejected (account takeover guard). Only enable
-        // when the server guarantees verified, unchangeable emails.
+        // was never linked is rejected (account takeover guard). When enabled,
+        // the account is linked only if the "email_verified" claim is true
+        // (laravel-sso-server 1.1+); servers that omit the claim are trusted
+        // to verify every email.
         'link_existing_users_by_email' => false,
 
         // Local column => claim (dot notation) in the SSO payload.

@@ -14,6 +14,8 @@ use JeffersonGoncalves\SsoClient\Services\SsoClientManager;
  * @method static array<string, mixed> verifyAccessToken(string $token)
  * @method static array<string, mixed> fetchUserInfo(string $token)
  * @method static void verifySignature(string $payload, ?string $timestamp, ?string $signature)
+ * @method static string logoutUrl(string $accessToken)
+ * @method static string postLogoutRedirectUri()
  * @method static void logoutSubject(string $sub)
  * @method static bool isRevoked(\Illuminate\Contracts\Session\Session $session)
  *

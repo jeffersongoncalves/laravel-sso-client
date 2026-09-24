@@ -10,7 +10,7 @@ uses(TestCase::class)->in('Feature');
 uses(InteropTestCase::class)->in('Interop');
 
 /**
- * Access token claims as laravel-sso-server 1.0 issues them for "client-app".
+ * Access token claims as laravel-sso-server 1.1 issues them for "client-app".
  *
  * @param  array<string, mixed>  $overrides
  * @return array<string, mixed>
@@ -20,6 +20,7 @@ function ssoClaims(array $overrides = []): array
     return array_merge([
         'name' => 'Ada Lovelace',
         'email' => 'ada@example.com',
+        'email_verified' => true,
         'iss' => 'https://sso.test',
         'sub' => '42',
         'aud' => 'client-app',

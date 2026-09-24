@@ -38,8 +38,8 @@ class DefaultUserSynchronizer implements SsoUserSynchronizerContract
         $ssoIdColumn = $this->config->get('sso-client.user.sso_id_column', 'sso_id');
 
         $user = is_string($ssoIdColumn) && $ssoIdColumn !== ''
-            ? $this->resolveLinked($ssoIdColumn, $sub, $attributes)
-            : $this->resolveByEmail($attributes);
+            ? $this->resolveLinked($ssoIdColumn, $sub, $attributes, $ssoPayload)
+            : $this->resolveByEmail($attributes, $ssoPayload);
 
         $user->forceFill($attributes);
 
@@ -56,8 +56,9 @@ class DefaultUserSynchronizer implements SsoUserSynchronizerContract
 
     /**
      * @param  array<string, mixed>  $attributes  Mapped columns; receives the sso_id column.
+     * @param  array<string, mixed>  $ssoPayload
      */
-    protected function resolveLinked(string $ssoIdColumn, string $sub, array &$attributes): Model
+    protected function resolveLinked(string $ssoIdColumn, string $sub, array &$attributes, array $ssoPayload): Model
     {
         $query = $this->modelClass()::query();
 
@@ -77,7 +78,8 @@ class DefaultUserSynchronizer implements SsoUserSynchronizerContract
 
         // Linked to another server user: never re-link, whatever the flag says.
         if ($existing->getAttribute($ssoIdColumn) !== null
-            || ! $this->config->get('sso-client.user.link_existing_users_by_email', false)) {
+            || ! $this->config->get('sso-client.user.link_existing_users_by_email', false)
+            || ! $this->emailTrusted($ssoPayload)) {
             throw new AccountLinkingException('The SSO email belongs to an existing local account that is not linked to this SSO user.');
         }
 
@@ -88,8 +90,9 @@ class DefaultUserSynchronizer implements SsoUserSynchronizerContract
      * Legacy mode (sso_id_column = null): the email is the only identifier.
      *
      * @param  array<string, mixed>  $attributes
+     * @param  array<string, mixed>  $ssoPayload
      */
-    protected function resolveByEmail(array $attributes): Model
+    protected function resolveByEmail(array $attributes, array $ssoPayload): Model
     {
         $email = $attributes[$this->emailColumn()] ?? null;
 
@@ -97,7 +100,24 @@ class DefaultUserSynchronizer implements SsoUserSynchronizerContract
             throw new SsoClientException('SSO payload has no email to match the local user.');
         }
 
-        return $this->modelClass()::query()->firstOrNew([$this->emailColumn() => $email]);
+        $user = $this->modelClass()::query()->firstOrNew([$this->emailColumn() => $email]);
+
+        if ($user->exists && ! $this->emailTrusted($ssoPayload)) {
+            throw new AccountLinkingException('The SSO email is not verified by the server.');
+        }
+
+        return $user;
+    }
+
+    /**
+     * laravel-sso-server 1.1+ sends "email_verified": only true may link by
+     * email. Older servers omit it; linking then relies on the explicit config.
+     *
+     * @param  array<string, mixed>  $ssoPayload
+     */
+    protected function emailTrusted(array $ssoPayload): bool
+    {
+        return ! array_key_exists('email_verified', $ssoPayload) || $ssoPayload['email_verified'] === true;
     }
 
     /**

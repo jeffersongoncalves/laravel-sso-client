@@ -18,7 +18,7 @@ SSO client for Laravel apps that authenticate against [`jeffersongoncalves/larav
 
 | Package | PHP | Laravel | laravel-sso-server |
 |---------|-----|---------|--------------------|
-| 1.x     | 8.2+ | 12.x, 13.x | 1.x |
+| 1.x     | 8.2+ | 12.x, 13.x | 1.x (1.1+ for `email_verified` and client-initiated logout) |
 
 ## Installation
 
@@ -67,9 +67,23 @@ Routes registered by the package (prefix configurable via `sso-client.route.pref
 |--------|-----|------|---------|
 | GET  | `/sso/redirect`    | `sso-client.redirect`    | Starts the flow (state + PKCE S256) |
 | GET  | `/sso/callback`    | `sso-client.callback`    | Checks state, exchanges the code, logs in |
+| POST | `/sso/logout`      | `sso-client.logout`      | Ends the local session, then the SSO session and the user's other apps (CSRF-protected) |
 | POST | `/sso/slo-webhook` | `sso-client.slo-webhook` | Back-channel Single Logout (no session, no CSRF, HMAC-authenticated) |
 
-The server paths (`/sso/authorize`, `/sso/token`, `/sso/userinfo`, `/.well-known/jwks.json`) are configurable in `sso-client.endpoints` to follow the server's route prefix.
+The server paths (`/sso/authorize`, `/sso/token`, `/sso/userinfo`, `/sso/logout`, `/.well-known/jwks.json`) are configurable in `sso-client.endpoints` to follow the server's route prefix.
+
+### Logging out
+
+Point the app's logout button at `sso-client.logout`:
+
+```blade
+<form method="POST" action="{{ route('sso-client.logout') }}">
+    @csrf
+    <button type="submit">Log out</button>
+</form>
+```
+
+The local session is destroyed first; then the browser goes to the server (`laravel-sso-server` 1.1+), which ends the SSO session, sends the Single Logout webhook to the user's other client apps and returns to `sso-client.post_logout_redirect_uri` (default: the `home` URL; it must share the origin of the redirect URI). Users who did not sign in through SSO are only logged out locally.
 
 ### Custom user synchronization
 
@@ -79,10 +93,10 @@ The default synchronizer links local users to the server's `sub` (`sso-client.us
 |--------------------|--------|
 | A user with this `sub` exists | Updated and logged in (even if the email changed on the server) |
 | No user with this `sub` or this email | Created and linked |
-| A local user with this email exists, not linked | **Rejected** (`AccountLinkingException`, 401) unless `link_existing_users_by_email` is `true` |
+| A local user with this email exists, not linked | **Rejected** (`AccountLinkingException`, 401) unless `link_existing_users_by_email` is `true` **and** the `email_verified` claim is `true` |
 | A local user with this email is linked to another `sub` | Always rejected |
 
-Emails are mutable and the server does not assert that they are verified, so trusting them to take over an existing account would let anyone who registers that address on the server sign in as the local user. Only set `link_existing_users_by_email => true` (e.g. for a one-time migration of pre-SSO accounts) when the server guarantees verified, unchangeable emails. Setting `sso_id_column => null` matches users by email only, with no protection at all.
+Emails are mutable, so trusting an unverified one to take over an existing account would let anyone who registers that address on the server sign in as the local user. `laravel-sso-server` 1.1+ sends an `email_verified` claim, and email linking is refused unless it is exactly `true`; older servers do not send it, and then `link_existing_users_by_email => true` is your statement that the server verifies every email. Enable the flag only when needed (e.g. to adopt pre-SSO accounts). Setting `sso_id_column => null` matches users by email only (legacy mode); existing users are still refused when `email_verified` is `false`.
 
 To keep users in memory only or map roles, implement the contract and set `sso-client.synchronizer`:
 
@@ -123,15 +137,16 @@ Failures are subclasses of `SsoClientException`: `InvalidStateException`, `Inval
 3. **Verification.**
    - `jwks`: the `access_token` is verified locally against `{server}/.well-known/jwks.json` (cached for `jwks_cache_ttl`, refetched once on an unknown `kid`, so key rotation just works). Only `RS256` is accepted; `iss`, `aud`, `exp`, `nbf` (with `leeway`) are checked and each `jti` is accepted once.
    - `userinfo`: `GET {server}/sso/userinfo` with the Bearer token. The response must carry a valid `X-SSO-Signature` over the raw body and a fresh `X-SSO-Timestamp`. Costs a round-trip, but the server rejects users who already logged out.
-4. **Login.** The synchronizer resolves the local user by `sub` (see the table above), which is logged into the configured guard; the session is regenerated and remembers the server `sub`.
-5. **Single Logout.** When the user logs out on the server, it POSTs `{"event":"logout","sub","aud","iat","jti"}` to the webhook. The client checks `X-SSO-Signature = HMAC-SHA256("{X-SSO-Timestamp}.{raw body}", client_secret)` and a timestamp within `signature_tolerance` (300 s), then `event` and `aud`, and answers `204`. A replayed `jti` is acknowledged but ignored, so the server stops retrying. Every local session of that `sub` started before the webhook is ended by `sso.auth` on its next request.
+4. **Login.** The synchronizer resolves the local user by `sub` (see the table above), which is logged into the configured guard; the session is regenerated and remembers the server `sub` and the access token (the `token_hint` for logout).
+5. **Client-initiated logout.** `POST /sso/logout` destroys the local session and redirects to `{server}/sso/logout?client_id=...&token_hint=...&post_logout_redirect_uri=...`. The server revokes all of the user's SSO sessions and notifies every other client through the webhook below (not this one).
+6. **Single Logout.** When the user logs out on the server, it POSTs `{"event":"logout","sub","aud","iat","jti"}` to the webhook. The client checks `X-SSO-Signature = HMAC-SHA256("{X-SSO-Timestamp}.{raw body}", client_secret)` and a timestamp within `signature_tolerance` (300 s), then `event` and `aud`, and answers `204`. A replayed `jti` is acknowledged but ignored, so the server stops retrying. Every local session of that `sub` started before the webhook is ended by `sso.auth` on its next request.
 
 ### Production notes
 
 - Use a shared, atomic cache store (Redis, Memcached, database): the `jti` anti-replay markers and the Single Logout markers live there, and every app server must see them.
 - Revocation is enforced by `sso.auth`: routes without it do not see a remote logout.
 - In `jwks` mode a token stays valid until it expires; logout reaches the client only through the webhook. Use `userinfo` if you need the server to confirm every login.
-- The server has no logout endpoint for clients in 1.x: logging out of the client app is local only.
+- The access token is kept in the session for logout: use a server-side session driver or keep the (encrypted) cookie driver's default encryption on.
 
 ## Testing
 

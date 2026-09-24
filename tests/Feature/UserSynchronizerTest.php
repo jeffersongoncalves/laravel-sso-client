@@ -48,6 +48,38 @@ it('links an existing account by email only when explicitly allowed', function (
     expect($user->is($local))->toBeTrue()->and($user->sso_id)->toBe('42');
 });
 
+it('never links by email when the server says the email is not verified', function (): void {
+    config(['sso-client.user.link_existing_users_by_email' => true]);
+    $local = User::create(['name' => 'Local Admin', 'email' => 'ada@example.com', 'password' => 'secret']);
+
+    expect(fn () => synchronizeSso(['email_verified' => false]))->toThrow(AccountLinkingException::class)
+        ->and(fn () => synchronizeSso(['email_verified' => 'true']))->toThrow(AccountLinkingException::class);
+
+    expect($local->fresh()->sso_id)->toBeNull();
+});
+
+it('trusts the explicit config when an older server omits email_verified', function (): void {
+    config(['sso-client.user.link_existing_users_by_email' => true]);
+    $local = User::create(['name' => 'Local Admin', 'email' => 'ada@example.com', 'password' => 'secret']);
+    $claims = ssoClaims();
+    unset($claims['email_verified']);
+
+    $user = app(SsoUserSynchronizerContract::class)->synchronize($claims);
+
+    expect($user->is($local))->toBeTrue()->and($user->sso_id)->toBe('42');
+});
+
+it('still creates brand new users whose email is not verified', function (): void {
+    expect(synchronizeSso(['email_verified' => false])->sso_id)->toBe('42');
+});
+
+it('refuses unverified emails for existing users in legacy mode', function (): void {
+    config(['sso-client.user.sso_id_column' => null]);
+    User::create(['name' => 'Local Admin', 'email' => 'ada@example.com', 'password' => 'secret']);
+
+    expect(fn () => synchronizeSso(['email_verified' => false]))->toThrow(AccountLinkingException::class);
+});
+
 it('never re-links an account already linked to another sub', function (): void {
     config(['sso-client.user.link_existing_users_by_email' => true]);
     synchronizeSso(['sub' => '7']);
