@@ -19,7 +19,6 @@ use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Http\Request;
-use Illuminate\Session\SessionManager;
 use Illuminate\Support\Str;
 use JeffersonGoncalves\SsoClient\Contracts\SsoUserSynchronizerContract;
 use JeffersonGoncalves\SsoClient\Events\UserSynchronizedEvent;
@@ -36,18 +35,21 @@ class SsoClientManager
 {
     public const SIGNATURE_HEADER = 'X-SSO-Signature';
 
+    public const TIMESTAMP_HEADER = 'X-SSO-Timestamp';
+
     public const SESSION_STATE = 'sso-client.state';
 
     public const SESSION_VERIFIER = 'sso-client.code_verifier';
 
-    public const SESSION_SID = 'sso-client.sid';
+    public const SESSION_SUB = 'sso-client.sub';
+
+    public const SESSION_AUTHENTICATED_AT = 'sso-client.authenticated_at';
 
     public function __construct(
         protected ConfigRepository $config,
         protected CacheRepository $cache,
         protected HttpFactory $http,
         protected AuthFactory $auth,
-        protected SessionManager $sessions,
         protected SsoUserSynchronizerContract $synchronizer,
     ) {}
 
@@ -93,10 +95,6 @@ class SsoClientManager
             throw new InvalidStateException('Invalid SSO state.');
         }
 
-        if (is_string($request->query('error'))) {
-            throw new SsoClientException("SSO Server returned error \"{$request->query('error')}\".");
-        }
-
         $code = $request->query('code');
 
         if (! is_string($code) || $code === '' || ! is_string($verifier)) {
@@ -112,22 +110,18 @@ class SsoClientManager
         $this->guard()->login($user);
         $session->regenerate();
 
-        $sid = $claims['sid'] ?? null;
-
-        if (is_string($sid) && $sid !== '') {
-            $session->put(self::SESSION_SID, $sid);
-            $this->cache->put(
-                $this->sidCacheKey($sid),
-                $session->getId(),
-                now()->addMinutes((int) $this->config->get('session.lifetime', 120)),
-            );
-        }
+        // Lets a later Single Logout webhook (keyed by "sub") revoke this session.
+        $session->put([
+            self::SESSION_SUB => $claims['sub'],
+            self::SESSION_AUTHENTICATED_AT => microtime(true),
+        ]);
 
         return $user;
     }
 
     /**
-     * Exchange the authorization code for verified, not-yet-used claims.
+     * Exchange the authorization code for verified claims, using the
+     * configured verification mode.
      *
      * @return array<string, mixed>
      *
@@ -135,93 +129,167 @@ class SsoClientManager
      */
     public function exchangeCode(string $code, string $codeVerifier): array
     {
-        $body = json_encode([
+        $response = $this->send(fn (PendingRequest $http): Response => $http->asForm()->post($this->endpoint('token'), [
             'grant_type' => 'authorization_code',
+            'client_id' => $this->clientId(),
+            'client_secret' => $this->secret(),
             'code' => $code,
             'redirect_uri' => $this->redirectUri(),
-            'client_id' => $this->clientId(),
             'code_verifier' => $codeVerifier,
-        ], JSON_THROW_ON_ERROR);
-
-        $response = $this->send(fn (PendingRequest $http): Response => $http
-            ->withHeaders([self::SIGNATURE_HEADER => $this->sign($body)])
-            ->withBody($body, 'application/json')
-            ->post($this->endpoint('token')));
+        ]));
 
         if ($response->failed()) {
-            throw new SsoClientException("SSO token exchange failed with HTTP {$response->status()}.");
+            $error = $response->json('error');
+            $message = "SSO token exchange failed with HTTP {$response->status()}".(is_string($error) ? " ({$error})." : '.');
+
+            throw $response->status() === 401
+                ? new SsoClientMismatchException($message)
+                : new SsoClientException($message);
         }
 
-        if ($this->config->get('sso-client.verification') === 'hmac') {
-            $this->verifySignature($response->body(), $response->header(self::SIGNATURE_HEADER));
-            $claims = $response->json();
-        } else {
-            $token = $response->json('token');
+        $token = $response->json('access_token');
 
-            if (! is_string($token)) {
-                throw new SsoClientException('SSO token response has no "token".');
+        if (! is_string($token) || $token === '') {
+            throw new SsoClientException('SSO token response has no "access_token".');
+        }
+
+        return $this->config->get('sso-client.verification') === 'userinfo'
+            ? $this->fetchUserInfo($token)
+            : $this->verifyAccessToken($token);
+    }
+
+    /**
+     * Validate an RS256 access token locally against the server's JWKS.
+     *
+     * @return array<string, mixed>
+     *
+     * @throws SsoClientException
+     */
+    public function verifyAccessToken(string $token): array
+    {
+        $claims = $this->decodeJwt($token);
+
+        foreach (['sub', 'jti'] as $claim) {
+            if (! isset($claims[$claim]) || ! is_string($claims[$claim]) || $claims[$claim] === '') {
+                throw new SsoClientException("SSO token is missing the \"{$claim}\" claim.");
             }
-
-            $claims = $this->decodeJwt($token);
         }
 
-        if (! is_array($claims)) {
-            throw new SsoClientException('SSO token response is not a JSON object.');
+        // firebase/php-jwt only enforces exp when present: require it.
+        if (! isset($claims['exp']) || ! is_numeric($claims['exp'])) {
+            throw new TokenExpiredException('SSO token is missing "exp".');
         }
 
-        /** @var array<string, mixed> $claims */
-        $this->validateClaims($claims);
+        if (($claims['iss'] ?? null) !== $this->issuer()) {
+            throw new SsoClientMismatchException('SSO token "iss" does not match sso-client.issuer.');
+        }
+
+        if (! in_array($this->clientId(), (array) ($claims['aud'] ?? []), true)) {
+            throw new SsoClientMismatchException('SSO token "aud" does not include sso-client.client_id.');
+        }
+
+        // Remember the jti for as long as the token could still be accepted.
+        if (! $this->consumeOnce($claims['jti'], (int) $claims['exp'] + $this->leeway() - time())) {
+            throw new TokenReplayedException('SSO token was already used.');
+        }
 
         return $claims;
     }
 
     /**
-     * @throws InvalidSignatureException
+     * Resolve the claims through GET /sso/userinfo; the server rejects tokens
+     * of users that logged out, and signs the response with the client secret.
+     *
+     * @return array<string, mixed>
+     *
+     * @throws SsoClientException
      */
-    public function verifySignature(string $payload, ?string $signature): void
+    public function fetchUserInfo(string $token): array
     {
-        if (! is_string($signature) || $signature === '' || ! hash_equals($this->sign($payload), $signature)) {
+        $response = $this->send(fn (PendingRequest $http): Response => $http->withToken($token)->get($this->endpoint('userinfo')));
+
+        if ($response->failed()) {
+            throw new SsoClientException("SSO userinfo failed with HTTP {$response->status()}.");
+        }
+
+        $this->verifySignature(
+            $response->body(),
+            $response->header(self::TIMESTAMP_HEADER),
+            $response->header(self::SIGNATURE_HEADER),
+        );
+
+        $claims = $response->json();
+
+        if (! is_array($claims) || ! isset($claims['sub']) || ! is_string($claims['sub']) || $claims['sub'] === '') {
+            throw new SsoClientException('SSO userinfo response has no "sub".');
+        }
+
+        /** @var array<string, mixed> $claims */
+        return $claims;
+    }
+
+    /**
+     * Verify X-SSO-Signature = hex HMAC-SHA256("{timestamp}.{raw body}", client_secret)
+     * and reject timestamps outside sso-client.signature_tolerance.
+     *
+     * @throws InvalidSignatureException|TokenExpiredException
+     */
+    public function verifySignature(string $payload, ?string $timestamp, ?string $signature): void
+    {
+        if (! is_string($timestamp) || ! ctype_digit($timestamp) || ! is_string($signature) || $signature === ''
+            || ! hash_equals(hash_hmac('sha256', $timestamp.'.'.$payload, $this->secret()), $signature)) {
             throw new InvalidSignatureException('Invalid X-SSO-Signature.');
         }
-    }
 
-    public function sign(string $payload): string
-    {
-        $secret = (string) $this->config->get('sso-client.client_secret');
-
-        if ($secret === '') {
-            throw new SsoClientException('sso-client.client_secret is not configured.');
-        }
-
-        return hash_hmac('sha256', $payload, $secret);
-    }
-
-    /**
-     * Mark a token/webhook id as used. Cache::add() is atomic, so two
-     * concurrent requests with the same jti cannot both pass.
-     *
-     * @throws TokenReplayedException
-     */
-    public function consumeOnce(string $jti, int $ttlSeconds): void
-    {
-        if (! $this->cache->add('sso-client:jti:'.hash('sha256', $jti), true, max($ttlSeconds, 1))) {
-            throw new TokenReplayedException('SSO token was already used.');
+        if (abs(time() - (int) $timestamp) > $this->signatureTolerance()) {
+            throw new TokenExpiredException('X-SSO-Timestamp is outside the tolerance window.');
         }
     }
 
     /**
-     * Destroy the local session bound to the Server session id (Single Logout).
+     * Mark an id as used. Cache::add() is atomic, so two concurrent requests
+     * with the same jti cannot both get true.
      */
-    public function logoutSession(string $sid): bool
+    public function consumeOnce(string $jti, int $ttlSeconds): bool
     {
-        $sessionId = $this->cache->pull($this->sidCacheKey($sid));
+        return $this->cache->add('sso-client:jti:'.hash('sha256', $jti), true, max($ttlSeconds, 1));
+    }
 
-        if (! is_string($sessionId) || $sessionId === '') {
+    /**
+     * Single Logout: every local session of this server user that started
+     * before now is revoked (enforced by the sso.auth middleware).
+     */
+    public function logoutSubject(string $sub): void
+    {
+        $this->cache->put(
+            $this->logoutCacheKey($sub),
+            microtime(true),
+            now()->addMinutes((int) $this->config->get('session.lifetime', 120)),
+        );
+    }
+
+    public function isRevoked(Session $session): bool
+    {
+        $sub = $session->get(self::SESSION_SUB);
+
+        if (! is_string($sub)) {
             return false;
         }
 
-        // ponytail: cookie session driver keeps state client-side and cannot be destroyed here.
-        return $this->sessions->driver()->getHandler()->destroy($sessionId);
+        $loggedOutAt = $this->cache->get($this->logoutCacheKey($sub));
+
+        return is_numeric($loggedOutAt)
+            && (float) $loggedOutAt >= (float) $session->get(self::SESSION_AUTHENTICATED_AT, 0);
+    }
+
+    public function clientId(): string
+    {
+        return (string) $this->config->get('sso-client.client_id');
+    }
+
+    public function signatureTolerance(): int
+    {
+        return (int) $this->config->get('sso-client.signature_tolerance', 300);
     }
 
     /**
@@ -242,6 +310,7 @@ class SsoClientManager
         JWT::$leeway = $this->leeway();
 
         try {
+            // Every Key is pinned to RS256, so any other "alg" header is rejected.
             $decoded = JWT::decode($token, $keys);
         } catch (ExpiredException $e) {
             throw new TokenExpiredException('SSO token has expired.', previous: $e);
@@ -265,7 +334,7 @@ class SsoClientManager
         }
 
         /** @var array<string, mixed> $jwks */
-        $jwks = $this->cache->remember($cacheKey, (int) $this->config->get('sso-client.jwks_cache_ttl', 3600), function (): array {
+        $jwks = $this->cache->remember($cacheKey, (int) $this->config->get('sso-client.jwks_cache_ttl', 300), function (): array {
             $response = $this->send(fn (PendingRequest $http): Response => $http->get($this->endpoint('jwks')));
             $jwks = $response->json();
 
@@ -295,43 +364,6 @@ class SsoClientManager
     }
 
     /**
-     * @param  array<string, mixed>  $claims
-     *
-     * @throws SsoClientException
-     */
-    protected function validateClaims(array $claims): void
-    {
-        foreach (['sub', 'jti'] as $claim) {
-            if (! isset($claims[$claim]) || ! is_string($claims[$claim]) || $claims[$claim] === '') {
-                throw new SsoClientException("SSO token is missing the \"{$claim}\" claim.");
-            }
-        }
-
-        if (! isset($claims['exp'], $claims['iat']) || ! is_numeric($claims['exp']) || ! is_numeric($claims['iat'])) {
-            throw new TokenExpiredException('SSO token is missing "exp"/"iat".');
-        }
-
-        $now = time();
-
-        if ((int) $claims['exp'] + $this->leeway() < $now || (int) $claims['iat'] - $this->leeway() > $now) {
-            throw new TokenExpiredException('SSO token is outside its validity window.');
-        }
-
-        if (($claims['iss'] ?? null) !== $this->serverUrl()) {
-            throw new SsoClientMismatchException('SSO token "iss" does not match sso-client.server_url.');
-        }
-
-        $aud = (array) ($claims['aud'] ?? []);
-
-        if (! in_array($this->clientId(), $aud, true)) {
-            throw new SsoClientMismatchException('SSO token "aud" does not include sso-client.client_id.');
-        }
-
-        // Remember the jti for as long as the token could still be accepted.
-        $this->consumeOnce($claims['jti'], (int) $claims['exp'] + $this->leeway() - $now);
-    }
-
-    /**
      * @param  callable(PendingRequest): Response  $callback
      *
      * @throws SsoServerUnreachableException
@@ -341,7 +373,7 @@ class SsoClientManager
         $http = $this->http
             ->timeout((int) $this->config->get('sso-client.http_timeout', 5))
             ->acceptJson()
-            // Only network failures are retried: a 4xx on a one-time code must not be replayed.
+            // Only network failures are retried: the server burns the code on any 4xx.
             ->retry(3, 100, fn (Throwable $e): bool => $e instanceof ConnectionException, throw: false);
 
         try {
@@ -362,6 +394,17 @@ class SsoClientManager
         return $guard;
     }
 
+    protected function secret(): string
+    {
+        $secret = (string) $this->config->get('sso-client.client_secret');
+
+        if ($secret === '') {
+            throw new SsoClientException('sso-client.client_secret is not configured.');
+        }
+
+        return $secret;
+    }
+
     protected function endpoint(string $name): string
     {
         return $this->serverUrl().'/'.ltrim((string) $this->config->get("sso-client.endpoints.{$name}"), '/');
@@ -372,9 +415,9 @@ class SsoClientManager
         return rtrim((string) $this->config->get('sso-client.server_url'), '/');
     }
 
-    protected function clientId(): string
+    protected function issuer(): string
     {
-        return (string) $this->config->get('sso-client.client_id');
+        return (string) ($this->config->get('sso-client.issuer') ?: $this->serverUrl());
     }
 
     protected function redirectUri(): string
@@ -387,9 +430,9 @@ class SsoClientManager
         return (int) $this->config->get('sso-client.leeway', 30);
     }
 
-    protected function sidCacheKey(string $sid): string
+    protected function logoutCacheKey(string $sub): string
     {
-        return 'sso-client:sid:'.hash('sha256', $sid);
+        return 'sso-client:logout:'.hash('sha256', $sub);
     }
 
     protected static function base64UrlEncode(string $bytes): string

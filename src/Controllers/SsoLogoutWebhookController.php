@@ -10,25 +10,32 @@ use JeffersonGoncalves\SsoClient\Events\SsoRemoteLogoutReceivedEvent;
 use JeffersonGoncalves\SsoClient\Services\SsoClientManager;
 
 /**
- * Back-channel Single Logout. Signature, freshness and replay are already
- * checked by VerifySsoWebhookSignature.
+ * Back-channel Single Logout. The signature and timestamp are already checked
+ * by VerifySsoWebhookSignature.
+ *
+ * Body: {"event": "logout", "sub": "42", "aud": "<client_id>", "iat": 1790000000, "jti": "<uuid>"}
  */
 class SsoLogoutWebhookController
 {
     public function __invoke(Request $request, SsoClientManager $sso): Response
     {
-        $sid = $request->json('sid');
         $sub = $request->json('sub');
+        $jti = $request->json('jti');
 
-        if (! is_string($sid) || $sid === '') {
-            abort(422, 'Missing "sid".');
+        if ($request->json('event') !== 'logout'
+            || $request->json('aud') !== $sso->clientId()
+            || ! is_string($sub) || $sub === ''
+            || ! is_string($jti) || $jti === '') {
+            abort(422, 'Invalid SSO logout payload.');
         }
 
-        $destroyed = $sso->logoutSession($sid);
+        // A replay is acknowledged but ignored: a non-2xx would make the server retry it.
+        if ($sso->consumeOnce('webhook:'.$jti, 2 * $sso->signatureTolerance())) {
+            $sso->logoutSubject($sub);
 
-        SsoRemoteLogoutReceivedEvent::dispatch($sid, is_string($sub) ? $sub : null, $destroyed);
+            SsoRemoteLogoutReceivedEvent::dispatch($sub);
+        }
 
-        // 204 even when no local session exists: the Server must not retry forever.
         return response()->noContent();
     }
 }

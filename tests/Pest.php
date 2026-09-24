@@ -3,12 +3,14 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
+use JeffersonGoncalves\SsoClient\Tests\InteropTestCase;
 use JeffersonGoncalves\SsoClient\Tests\TestCase;
 
 uses(TestCase::class)->in('Feature');
+uses(InteropTestCase::class)->in('Interop');
 
 /**
- * Claims the SSO Server would issue for "client-app".
+ * Access token claims as laravel-sso-server 1.0 issues them for "client-app".
  *
  * @param  array<string, mixed>  $overrides
  * @return array<string, mixed>
@@ -16,16 +18,31 @@ uses(TestCase::class)->in('Feature');
 function ssoClaims(array $overrides = []): array
 {
     return array_merge([
-        'iss' => 'https://sso.test',
-        'aud' => 'client-app',
-        'sub' => 'user-42',
-        'sid' => 'server-session-1',
-        'jti' => (string) Str::uuid(),
-        'iat' => time(),
-        'exp' => time() + 60,
         'name' => 'Ada Lovelace',
         'email' => 'ada@example.com',
+        'iss' => 'https://sso.test',
+        'sub' => '42',
+        'aud' => 'client-app',
+        'iat' => time(),
+        'nbf' => time(),
+        'exp' => time() + 3600,
+        'jti' => (string) Str::uuid(),
     ], $overrides);
+}
+
+/**
+ * The server's signatureHeaders(): HMAC-SHA256 of "{timestamp}.{body}".
+ *
+ * @return array{X-SSO-Timestamp: string, X-SSO-Signature: string}
+ */
+function ssoSignatureHeaders(string $body, ?int $timestamp = null, string $secret = 'shared-secret'): array
+{
+    $timestamp = (string) ($timestamp ?? time());
+
+    return [
+        'X-SSO-Timestamp' => $timestamp,
+        'X-SSO-Signature' => hash_hmac('sha256', $timestamp.'.'.$body, $secret),
+    ];
 }
 
 /**

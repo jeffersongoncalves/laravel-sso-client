@@ -39,8 +39,8 @@ class TestCase extends Orchestra
     {
         $app['config']->set([
             'app.key' => 'base64:'.base64_encode(random_bytes(32)),
-            // "testing" = in-memory SQLite; CI also runs with DB_CONNECTION=mysql|pgsql.
-            'database.default' => env('DB_CONNECTION', 'testing'),
+            'database.default' => 'testing',
+            'database.connections.testing' => $this->testing_connection(),
             'cache.default' => 'array',
             'session.driver' => 'array',
             'auth.providers.users.model' => User::class,
@@ -48,5 +48,32 @@ class TestCase extends Orchestra
             'sso-client.client_id' => 'client-app',
             'sso-client.client_secret' => 'shared-secret',
         ]);
+    }
+
+    /**
+     * In-memory SQLite locally; CI (tests.yml) sets SSO_CLIENT_TEST_DB_* to run
+     * the same suite against MySQL and PostgreSQL. Not the plain DB_* names:
+     * Testbench sets DB_CONNECTION=testing itself and would always win.
+     *
+     * @return array<string, mixed>
+     */
+    protected function testing_connection(): array
+    {
+        $driver = env('SSO_CLIENT_TEST_DB_DRIVER', 'sqlite');
+
+        if ($driver === 'sqlite') {
+            return ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => '', 'foreign_key_constraints' => true];
+        }
+
+        return [
+            'driver' => $driver,
+            'host' => env('SSO_CLIENT_TEST_DB_HOST', '127.0.0.1'),
+            'port' => env('SSO_CLIENT_TEST_DB_PORT'),
+            'database' => env('SSO_CLIENT_TEST_DB_DATABASE', 'testing'),
+            'username' => env('SSO_CLIENT_TEST_DB_USERNAME', 'root'),
+            'password' => env('SSO_CLIENT_TEST_DB_PASSWORD', ''),
+            'charset' => $driver === 'pgsql' ? 'utf8' : 'utf8mb4',
+            'prefix' => '',
+        ];
     }
 }

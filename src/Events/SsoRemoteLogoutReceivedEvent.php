@@ -10,9 +10,10 @@ class SsoRemoteLogoutReceivedEvent
 {
     use Dispatchable;
 
+    /**
+     * @param  string  $sub  The server's user id whose local sessions are now revoked.
+     */
     public function __construct(
-        public readonly string $sid,
-        public readonly ?string $sub,
-        public readonly bool $sessionDestroyed,
+        public readonly string $sub,
     ) {}
 }

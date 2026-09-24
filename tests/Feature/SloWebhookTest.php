@@ -4,81 +4,122 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use JeffersonGoncalves\SsoClient\Events\SsoRemoteLogoutReceivedEvent;
 use JeffersonGoncalves\SsoClient\Tests\Support\RsaKeyset;
 
 /**
+ * POST the webhook exactly as DispatchSingleLogoutJob does.
+ *
  * @param  array<string, mixed>  $overrides
+ * @param  array<string, string>|null  $headers
  */
-function sendSloWebhook(array $overrides = [], ?string $signature = null): TestResponse
+function sendSloWebhook(array $overrides = [], ?array $headers = null): TestResponse
 {
     $body = (string) json_encode(array_merge([
-        'sid' => 'server-session-1',
-        'sub' => 'user-42',
+        'event' => 'logout',
+        'sub' => '42',
+        'aud' => 'client-app',
         'iat' => time(),
-        'jti' => 'logout-1',
+        'jti' => (string) Str::uuid(),
     ], $overrides));
 
-    return test()->call('POST', '/sso/slo-webhook', server: [
-        'CONTENT_TYPE' => 'application/json',
-        'HTTP_X_SSO_SIGNATURE' => $signature ?? hash_hmac('sha256', $body, 'shared-secret'),
-    ], content: $body);
+    $server = ['CONTENT_TYPE' => 'application/json'];
+
+    foreach ($headers ?? ssoSignatureHeaders($body) as $name => $value) {
+        $server['HTTP_'.strtoupper(str_replace('-', '_', $name))] = $value;
+    }
+
+    return test()->call('POST', '/sso/slo-webhook', server: $server, content: $body);
 }
 
-function localSessionData(string $id): string
+function loginThroughSso(): void
 {
-    return app('session')->driver()->getHandler()->read($id);
+    test()->get('/sso/callback?code=c&state='.beginSsoLogin())->assertRedirect();
 }
 
 beforeEach(function (): void {
     Event::fake([SsoRemoteLogoutReceivedEvent::class]);
+    Route::get('/dashboard', fn () => 'ok')->middleware(['web', 'sso.auth']);
 
+    // Fresh token (new jti) on every exchange, like the real server.
     $keys = RsaKeyset::generate();
     Http::fake([
         'sso.test/.well-known/jwks.json' => Http::response($keys->jwks()),
-        'sso.test/sso/token' => Http::response(['token' => $keys->sign(ssoClaims())]),
+        'sso.test/sso/token' => fn () => Http::response(['access_token' => $keys->sign(ssoClaims())]),
     ]);
 
-    $this->get('/sso/callback?code=c&state='.beginSsoLogin())->assertRedirect('/');
-    $this->localSessionId = app('session')->driver()->getId();
+    loginThroughSso();
+    $this->get('/dashboard')->assertOk();
 });
 
-it('destroys the local session bound to the server sid', function (): void {
-    expect(localSessionData($this->localSessionId))->not->toBe('');
-
+it('revokes the local session of the logged-out server user', function (): void {
     sendSloWebhook()->assertNoContent();
 
-    expect(localSessionData($this->localSessionId))->toBe('');
-    Event::assertDispatched(SsoRemoteLogoutReceivedEvent::class, fn ($e): bool => $e->sid === 'server-session-1'
-        && $e->sub === 'user-42'
-        && $e->sessionDestroyed);
+    $this->get('/dashboard')->assertRedirect(route('sso-client.redirect'));
+    $this->assertGuest();
+    Event::assertDispatched(SsoRemoteLogoutReceivedEvent::class, fn ($e): bool => $e->sub === '42');
 });
 
-it('answers 204 for an unknown sid', function (): void {
-    sendSloWebhook(['sid' => 'unknown'])->assertNoContent();
+it('does not touch sessions of other server users', function (): void {
+    sendSloWebhook(['sub' => '7'])->assertNoContent();
 
-    expect(localSessionData($this->localSessionId))->not->toBe('');
-    Event::assertDispatched(SsoRemoteLogoutReceivedEvent::class, fn ($e): bool => ! $e->sessionDestroyed);
+    $this->get('/dashboard')->assertOk();
 });
 
-it('rejects invalid webhooks without touching the session', function (array $overrides, ?string $signature): void {
-    sendSloWebhook($overrides, $signature)->assertUnauthorized();
+it('lets the user sign in again after a remote logout', function (): void {
+    sendSloWebhook()->assertNoContent();
+    $this->get('/dashboard')->assertRedirect();
 
-    expect(localSessionData($this->localSessionId))->not->toBe('');
+    loginThroughSso();
+
+    $this->get('/dashboard')->assertOk();
+});
+
+it('acknowledges a replayed webhook without acting on it again', function (): void {
+    sendSloWebhook(['jti' => 'same'])->assertNoContent();
+    loginThroughSso();
+
+    sendSloWebhook(['jti' => 'same'])->assertNoContent();
+
+    $this->get('/dashboard')->assertOk();
+    Event::assertDispatchedTimes(SsoRemoteLogoutReceivedEvent::class, 1);
+});
+
+it('rejects unauthenticated webhooks', function (callable $headers): void {
+    $body = '{"event":"logout","sub":"42","aud":"client-app","iat":0,"jti":"x"}';
+
+    test()->call('POST', '/sso/slo-webhook', server: array_merge(['CONTENT_TYPE' => 'application/json'], $headers($body)), content: $body)
+        ->assertUnauthorized();
+
+    $this->get('/dashboard')->assertOk();
     Event::assertNotDispatched(SsoRemoteLogoutReceivedEvent::class);
 })->with([
-    'forged signature' => [[], str_repeat('0', 64)],
-    'missing signature' => [[], ''],
-    'stale iat' => [['iat' => time() - 300], null],
-    'missing jti' => [['jti' => null], null],
+    'no headers' => [fn (string $body): array => []],
+    'forged signature' => [fn (string $body): array => ['HTTP_X_SSO_TIMESTAMP' => (string) time(), 'HTTP_X_SSO_SIGNATURE' => str_repeat('0', 64)]],
+    'signed with another secret' => [fn (string $body): array => ['HTTP_X_SSO_TIMESTAMP' => (string) time(), 'HTTP_X_SSO_SIGNATURE' => ssoSignatureHeaders($body, secret: 'other')['X-SSO-Signature']]],
+    'stale timestamp' => [function (string $body): array {
+        $headers = ssoSignatureHeaders($body, time() - 301);
+
+        return ['HTTP_X_SSO_TIMESTAMP' => $headers['X-SSO-Timestamp'], 'HTTP_X_SSO_SIGNATURE' => $headers['X-SSO-Signature']];
+    }],
 ]);
 
-it('rejects a replayed webhook', function (): void {
-    sendSloWebhook(['sid' => 'unknown'])->assertNoContent();
-    sendSloWebhook(['sid' => 'unknown'])->assertUnauthorized();
-});
+it('rejects signed payloads that are not a logout for this client', function (array $overrides): void {
+    sendSloWebhook($overrides)->assertUnprocessable();
 
-it('requires a sid', function (): void {
-    sendSloWebhook(['sid' => null])->assertUnprocessable();
+    $this->get('/dashboard')->assertOk();
+})->with([
+    'other client' => [['aud' => 'another-app']],
+    'other event' => [['event' => 'login']],
+    'missing sub' => [['sub' => null]],
+    'missing jti' => [['jti' => null]],
+]);
+
+it('is reachable without a CSRF token or a session', function (): void {
+    expect(Route::getRoutes()->getByName('sso-client.slo-webhook')->gatherMiddleware())
+        ->not->toContain('web')
+        ->not->toContain('auth');
 });

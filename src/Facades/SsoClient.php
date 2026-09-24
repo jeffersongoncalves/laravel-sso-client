@@ -11,9 +11,11 @@ use JeffersonGoncalves\SsoClient\Services\SsoClientManager;
  * @method static string authorizationUrl(\Illuminate\Contracts\Session\Session $session)
  * @method static \Illuminate\Contracts\Auth\Authenticatable handleCallback(\Illuminate\Http\Request $request)
  * @method static array<string, mixed> exchangeCode(string $code, string $codeVerifier)
- * @method static void verifySignature(string $payload, ?string $signature)
- * @method static string sign(string $payload)
- * @method static bool logoutSession(string $sid)
+ * @method static array<string, mixed> verifyAccessToken(string $token)
+ * @method static array<string, mixed> fetchUserInfo(string $token)
+ * @method static void verifySignature(string $payload, ?string $timestamp, ?string $signature)
+ * @method static void logoutSubject(string $sub)
+ * @method static bool isRevoked(\Illuminate\Contracts\Session\Session $session)
  *
  * @see SsoClientManager
  */

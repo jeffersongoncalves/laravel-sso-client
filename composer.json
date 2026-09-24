@@ -1,6 +1,6 @@
 {
     "name": "jeffersongoncalves/laravel-sso-client",
-    "description": "SSO client for Laravel: Authorization Code + PKCE login, RS256/JWKS or HMAC token validation, user sync and back-channel Single Logout.",
+    "description": "SSO client for Laravel: Authorization Code + PKCE login, RS256/JWKS or signed userinfo token validation, user sync and back-channel Single Logout.",
     "keywords": [
         "laravel",
         "sso",
@@ -30,6 +30,7 @@
         "illuminate/support": "^12.0|^13.0"
     },
     "require-dev": {
+        "jeffersongoncalves/laravel-sso-server": "^1.0",
         "larastan/larastan": "^3.0",
         "laravel/pint": "^1.24",
         "orchestra/testbench": "^10.0|^11.0",

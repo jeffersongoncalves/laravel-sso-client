@@ -6,57 +6,90 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  tests:
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [sqlite, mysql, pgsql]
+
+    name: PHP 8.4 - Laravel 13 - ${{ matrix.database }}
 
     services:
       mysql:
         image: mysql:8.4
         env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
           MYSQL_DATABASE: testing
-          MYSQL_ROOT_PASSWORD: password
         ports:
           - 3306:3306
-        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -ppassword" --health-interval=10s --health-timeout=5s --health-retries=5
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
       postgres:
         image: postgres:17
         env:
-          POSTGRES_DB: testing
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: password
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testing
         ports:
           - 5432:5432
-        options: --health-cmd=pg_isready --health-interval=10s --health-timeout=5s --health-retries=5
-
-    strategy:
-      fail-fast: false
-      matrix:
-        php: [8.4]
-        laravel: ['13.*']
-        database: [sqlite, mysql, pgsql]
-
-    name: PHP ${{ matrix.php }} - Laravel ${{ matrix.laravel }} - ${{ matrix.database }}
+        options: >-
+          --health-cmd=pg_isready
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - name: Setup PHP
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
-          php-version: ${{ matrix.php }}
-          extensions: pdo_sqlite, pdo_mysql, pdo_pgsql, openssl
+          php-version: '8.4'
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite, pdo_mysql, pdo_pgsql, bcmath, intl, openssl, fileinfo
           coverage: none
-      - name: Install dependencies
+
+      - name: Install dependencies (Laravel 13)
         run: |
-          composer require "laravel/framework:${{ matrix.laravel }}" --no-interaction --no-update
-          composer update --prefer-dist --no-interaction
-      - name: Run tests
-        run: vendor/bin/pest
+          composer require "laravel/framework:^13.0" "orchestra/testbench:^11.0" "pestphp/pest:^4.0" "pestphp/pest-plugin-laravel:^4.0" --dev --no-interaction --no-update
+          composer update --prefer-stable --prefer-dist --no-interaction
+
+      - name: Run tests (sqlite)
+        if: matrix.database == 'sqlite'
+        run: vendor/bin/pest --no-coverage
+
+      - name: Run tests (mysql)
+        if: matrix.database == 'mysql'
         env:
-          # sqlite uses the in-memory "testing" connection from tests/TestCase.php.
-          DB_CONNECTION: ${{ matrix.database == 'sqlite' && 'testing' || matrix.database }}
-          DB_HOST: 127.0.0.1
-          DB_PORT: ${{ matrix.database == 'mysql' && '3306' || '5432' }}
-          DB_DATABASE: testing
-          DB_USERNAME: ${{ matrix.database == 'mysql' && 'root' || 'postgres' }}
-          DB_PASSWORD: password
+          SSO_CLIENT_TEST_DB_DRIVER: 'mysql'
+          SSO_CLIENT_TEST_DB_HOST: '127.0.0.1'
+          SSO_CLIENT_TEST_DB_PORT: '3306'
+          SSO_CLIENT_TEST_DB_USERNAME: 'root'
+          SSO_CLIENT_TEST_DB_PASSWORD: ''
+          SSO_CLIENT_TEST_DB_DATABASE: 'testing'
+        run: vendor/bin/pest --no-coverage
+
+      - name: Run tests (pgsql)
+        if: matrix.database == 'pgsql'
+        env:
+          SSO_CLIENT_TEST_DB_DRIVER: 'pgsql'
+          SSO_CLIENT_TEST_DB_HOST: '127.0.0.1'
+          SSO_CLIENT_TEST_DB_PORT: '5432'
+          SSO_CLIENT_TEST_DB_USERNAME: 'postgres'
+          SSO_CLIENT_TEST_DB_PASSWORD: 'postgres'
+          SSO_CLIENT_TEST_DB_DATABASE: 'testing'
+        run: vendor/bin/pest --no-coverage
