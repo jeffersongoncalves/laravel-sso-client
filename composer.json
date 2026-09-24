@@ -1,0 +1,75 @@
+{
+    "name": "jeffersongoncalves/laravel-sso-client",
+    "description": "SSO client for Laravel: Authorization Code + PKCE login, RS256/JWKS or HMAC token validation, user sync and back-channel Single Logout.",
+    "keywords": [
+        "laravel",
+        "sso",
+        "single-sign-on",
+        "pkce",
+        "jwt",
+        "jwks",
+        "single-logout",
+        "authentication"
+    ],
+    "homepage": "https://github.com/jeffersongoncalves/laravel-sso-client",
+    "license": "MIT",
+    "type": "library",
+    "authors": [
+        {
+            "name": "Jefferson Gonçalves",
+            "email": "gerson.simao.92@gmail.com",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "spatie/laravel-package-tools": "^1.16",
+        "firebase/php-jwt": "^7.0",
+        "illuminate/contracts": "^12.0|^13.0",
+        "illuminate/http": "^12.0|^13.0",
+        "illuminate/support": "^12.0|^13.0"
+    },
+    "require-dev": {
+        "larastan/larastan": "^3.0",
+        "laravel/pint": "^1.24",
+        "orchestra/testbench": "^10.0|^11.0",
+        "pestphp/pest": "^3.0|^4.0",
+        "pestphp/pest-plugin-laravel": "^3.0|^4.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "JeffersonGoncalves\\SsoClient\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "JeffersonGoncalves\\SsoClient\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": "@php ./vendor/bin/testbench package:discover --ansi",
+        "test": "vendor/bin/pest",
+        "test-coverage": "vendor/bin/pest --coverage",
+        "format": "vendor/bin/pint",
+        "analyse": "vendor/bin/phpstan analyse"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "phpstan/extension-installer": true
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "JeffersonGoncalves\\SsoClient\\SsoClientServiceProvider"
+            ],
+            "aliases": {
+                "SsoClient": "JeffersonGoncalves\\SsoClient\\Facades\\SsoClient"
+            }
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
