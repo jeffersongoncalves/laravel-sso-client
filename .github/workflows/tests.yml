@@ -9,17 +9,42 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: testing
+          MYSQL_ROOT_PASSWORD: password
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -ppassword" --health-interval=10s --health-timeout=5s --health-retries=5
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: testing
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: --health-cmd=pg_isready --health-interval=10s --health-timeout=5s --health-retries=5
+
     strategy:
+      fail-fast: false
       matrix:
         php: [8.4]
         laravel: ['13.*']
-    name: PHP ${{ matrix.php }} - Laravel ${{ matrix.laravel }}
+        database: [sqlite, mysql, pgsql]
+
+    name: PHP ${{ matrix.php }} - Laravel ${{ matrix.laravel }} - ${{ matrix.database }}
+
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup PHP
         uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
         with:
           php-version: ${{ matrix.php }}
+          extensions: pdo_sqlite, pdo_mysql, pdo_pgsql, openssl
           coverage: none
       - name: Install dependencies
         run: |
@@ -27,3 +52,11 @@ jobs:
           composer update --prefer-dist --no-interaction
       - name: Run tests
         run: vendor/bin/pest
+        env:
+          # sqlite uses the in-memory "testing" connection from tests/TestCase.php.
+          DB_CONNECTION: ${{ matrix.database == 'sqlite' && 'testing' || matrix.database }}
+          DB_HOST: 127.0.0.1
+          DB_PORT: ${{ matrix.database == 'mysql' && '3306' || '5432' }}
+          DB_DATABASE: testing
+          DB_USERNAME: ${{ matrix.database == 'mysql' && 'root' || 'postgres' }}
+          DB_PASSWORD: password
