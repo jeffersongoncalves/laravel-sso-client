@@ -80,10 +80,19 @@ return [
         // Null uses auth.providers.users.model.
         'model' => null,
 
-        // Column used to find the local user; its value comes from "attributes".
-        // To link by the server id instead, add an "sso_id" column, map
-        // 'sso_id' => 'sub' below and set this to 'sso_id'.
-        'identifier' => 'email',
+        // Column that stores the server's immutable "sub" and links local users
+        // to it (publish the migration: --tag="sso-client-migrations").
+        // Null matches users by email only: insecure unless the server verifies
+        // every email and never lets users change it.
+        'sso_id_column' => 'sso_id',
+
+        // Local email column, used to detect accounts that already exist.
+        'email_column' => 'email',
+
+        // An SSO login whose email belongs to an existing local account that
+        // was never linked is rejected (account takeover guard). Only enable
+        // when the server guarantees verified, unchangeable emails.
+        'link_existing_users_by_email' => false,
 
         // Local column => claim (dot notation) in the SSO payload.
         'attributes' => [

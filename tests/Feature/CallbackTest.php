@@ -85,15 +85,6 @@ it('completes the handshake, creates the local user and logs in', function (): v
     $this->get('/dashboard')->assertOk();
 });
 
-it('updates an existing user instead of duplicating it', function (): void {
-    User::create(['name' => 'Old Name', 'email' => 'ada@example.com', 'password' => 'secret']);
-    fakeServer($this->keys, ssoClaims());
-
-    $this->get('/sso/callback?code=c&state='.beginSsoLogin())->assertRedirect('/');
-
-    expect(User::count())->toBe(1)->and(User::sole()->name)->toBe('Ada Lovelace');
-});
-
 it('rejects a callback whose state does not match the session', function (): void {
     fakeServer($this->keys, ssoClaims());
     beginSsoLogin();

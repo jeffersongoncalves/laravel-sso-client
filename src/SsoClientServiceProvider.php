@@ -20,6 +20,7 @@ class SsoClientServiceProvider extends PackageServiceProvider
         $package
             ->name('laravel-sso-client')
             ->hasConfigFile('sso-client')
+            ->hasMigration('add_sso_id_to_users_table')
             ->hasRoute('web');
     }
 

@@ -26,6 +26,9 @@ class TestCase extends Orchestra
             $table->rememberToken();
             $table->timestamps();
         });
+
+        // The migration apps publish with --tag="sso-client-migrations".
+        (require __DIR__.'/../database/migrations/add_sso_id_to_users_table.php.stub')->up();
     }
 
     protected function getPackageProviders($app): array

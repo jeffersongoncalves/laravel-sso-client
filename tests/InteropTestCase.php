@@ -88,6 +88,9 @@ class InteropTestCase extends TestCase
             'sso-client.server_url' => 'https://idp.test',
             // actingAs(..., 'idp') switches the default guard; keep the client on "web".
             'sso-client.guard' => 'web',
+            // Server and client share one users table here, so the server user
+            // already exists locally (unlinked): allow linking it by email.
+            'sso-client.user.link_existing_users_by_email' => true,
         ]);
     }
 

@@ -1,0 +1,26 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('users', function (Blueprint $table) {
+            // The SSO server's "sub": the only stable identity of the user.
+            $table->string(config('sso-client.user.sso_id_column', 'sso_id'))->nullable()->unique();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('users', function (Blueprint $table) {
+            $column = config('sso-client.user.sso_id_column', 'sso_id');
+
+            $table->dropUnique([$column]);
+            $table->dropColumn($column);
+        });
+    }
+};

@@ -32,8 +32,12 @@ On the **client** app:
 
 ```bash
 composer require jeffersongoncalves/laravel-sso-client
-php artisan vendor:publish --tag="laravel-sso-client-config"
+php artisan vendor:publish --tag="sso-client-config"
+php artisan vendor:publish --tag="sso-client-migrations"
+php artisan migrate
 ```
+
+The migration adds a nullable, unique `sso_id` column to `users`: it stores the server's `sub`, the only stable identity of an SSO user.
 
 ```dotenv
 SSO_SERVER_URL=https://sso.example.com
@@ -69,9 +73,18 @@ The server paths (`/sso/authorize`, `/sso/token`, `/sso/userinfo`, `/.well-known
 
 ### Custom user synchronization
 
-The default synchronizer creates or updates an Eloquent user matched on `sso-client.user.identifier` (email by default), filling the columns mapped in `sso-client.user.attributes` from the server claims (`name` and `email` with the server's default serializer). New users get a random, unusable password.
+The default synchronizer links local users to the server's `sub` (`sso-client.user.sso_id_column`) and keeps the columns in `sso-client.user.attributes` in sync (`name` and `email` with the server's default serializer). New users get a random, unusable password.
 
-To link users by the server id instead of the email, add an `sso_id` column and set `'identifier' => 'sso_id'` with `'sso_id' => 'sub'` in the attribute map. To keep users in memory only or map roles, implement the contract and set `sso-client.synchronizer`:
+| Situation on login | Result |
+|--------------------|--------|
+| A user with this `sub` exists | Updated and logged in (even if the email changed on the server) |
+| No user with this `sub` or this email | Created and linked |
+| A local user with this email exists, not linked | **Rejected** (`AccountLinkingException`, 401) unless `link_existing_users_by_email` is `true` |
+| A local user with this email is linked to another `sub` | Always rejected |
+
+Emails are mutable and the server does not assert that they are verified, so trusting them to take over an existing account would let anyone who registers that address on the server sign in as the local user. Only set `link_existing_users_by_email => true` (e.g. for a one-time migration of pre-SSO accounts) when the server guarantees verified, unchangeable emails. Setting `sso_id_column => null` matches users by email only, with no protection at all.
+
+To keep users in memory only or map roles, implement the contract and set `sso-client.synchronizer`:
 
 ```php
 use Illuminate\Contracts\Auth\Authenticatable;
@@ -101,7 +114,7 @@ class RoleAwareSynchronizer implements SsoUserSynchronizerContract
 | `SsoLoginFailedEvent` | Any callback failure (`$exception`); the browser only gets a generic 401 |
 | `SsoRemoteLogoutReceivedEvent` | A new, valid Single Logout webhook (`$sub`: the server user id) |
 
-Failures are subclasses of `SsoClientException`: `InvalidStateException`, `InvalidSignatureException`, `TokenExpiredException`, `SsoClientMismatchException` (wrong `iss`/`aud`, or `invalid_client`), `TokenReplayedException`, `SsoServerUnreachableException`.
+Failures are subclasses of `SsoClientException`: `InvalidStateException`, `InvalidSignatureException`, `TokenExpiredException`, `SsoClientMismatchException` (wrong `iss`/`aud`, or `invalid_client`), `TokenReplayedException`, `SsoServerUnreachableException`, `AccountLinkingException`.
 
 ## How it works
 
@@ -110,7 +123,7 @@ Failures are subclasses of `SsoClientException`: `InvalidStateException`, `Inval
 3. **Verification.**
    - `jwks`: the `access_token` is verified locally against `{server}/.well-known/jwks.json` (cached for `jwks_cache_ttl`, refetched once on an unknown `kid`, so key rotation just works). Only `RS256` is accepted; `iss`, `aud`, `exp`, `nbf` (with `leeway`) are checked and each `jti` is accepted once.
    - `userinfo`: `GET {server}/sso/userinfo` with the Bearer token. The response must carry a valid `X-SSO-Signature` over the raw body and a fresh `X-SSO-Timestamp`. Costs a round-trip, but the server rejects users who already logged out.
-4. **Login.** The synchronizer returns the local user, which is logged into the configured guard; the session is regenerated and remembers the server `sub`.
+4. **Login.** The synchronizer resolves the local user by `sub` (see the table above), which is logged into the configured guard; the session is regenerated and remembers the server `sub`.
 5. **Single Logout.** When the user logs out on the server, it POSTs `{"event":"logout","sub","aud","iat","jti"}` to the webhook. The client checks `X-SSO-Signature = HMAC-SHA256("{X-SSO-Timestamp}.{raw body}", client_secret)` and a timestamp within `signature_tolerance` (300 s), then `event` and `aud`, and answers `204`. A replayed `jti` is acknowledged but ignored, so the server stops retrying. Every local session of that `sub` started before the webhook is ended by `sso.auth` on its next request.
 
 ### Production notes
