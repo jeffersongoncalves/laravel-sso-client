@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
+use JeffersonGoncalves\SsoClient\SsoClientServiceProvider;
 use JeffersonGoncalves\SsoServer\Controllers\TokenExchangeController;
 use JeffersonGoncalves\SsoServer\Controllers\UserInfoController;
 use JeffersonGoncalves\SsoServer\Models\SsoClient;
@@ -31,14 +32,6 @@ class InteropTestCase extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-
-        foreach (['create_sso_active_sessions_table', 'create_sso_clients_table'] as $name) {
-            (require $this->serverMigration($name))->down();
-        }
-
-        foreach (['create_sso_clients_table', 'create_sso_active_sessions_table'] as $name) {
-            (require $this->serverMigration($name))->up();
-        }
 
         $this->artisan('sso-server:keys')->assertSuccessful();
 
@@ -70,6 +63,12 @@ class InteropTestCase extends TestCase
     protected function getPackageProviders($app): array
     {
         return [...parent::getPackageProviders($app), SsoServerServiceProvider::class];
+    }
+
+    protected function defineDatabaseMigrations(): void
+    {
+        $this->loadMigrationsFrom(__DIR__.'/database/migrations');
+        $this->loadPackageMigrations(SsoClientServiceProvider::class, SsoServerServiceProvider::class);
     }
 
     protected function getEnvironmentSetUp($app): void
@@ -127,10 +126,5 @@ class InteropTestCase extends TestCase
     protected function toClientResponse(Response $response): mixed
     {
         return Http::response((string) $response->getContent(), $response->getStatusCode(), $response->headers->all());
-    }
-
-    protected function serverMigration(string $name): string
-    {
-        return __DIR__."/../vendor/jeffersongoncalves/laravel-sso-server/database/migrations/{$name}.php.stub";
     }
 }

@@ -4,32 +4,19 @@ declare(strict_types=1);
 
 namespace JeffersonGoncalves\SsoClient\Tests;
 
-use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
+use JeffersonGoncalves\PestPluginDatabaseMigrations\LoadsPackageMigrations;
 use JeffersonGoncalves\SsoClient\SsoClientServiceProvider;
 use JeffersonGoncalves\SsoClient\Tests\Support\User;
 use Orchestra\Testbench\TestCase as Orchestra;
 
 class TestCase extends Orchestra
 {
-    protected function setUp(): void
+    use LoadsPackageMigrations;
+
+    protected function defineDatabaseMigrations(): void
     {
-        parent::setUp();
-
-        // MySQL/PostgreSQL keep tables between tests; in-memory SQLite does not.
-        Schema::dropIfExists('users');
-        Schema::create('users', function (Blueprint $table): void {
-            $table->id();
-            $table->string('name');
-            $table->string('email')->unique();
-            $table->timestamp('email_verified_at')->nullable();
-            $table->string('password');
-            $table->rememberToken();
-            $table->timestamps();
-        });
-
-        // The migration apps publish with --tag="sso-client-migrations".
-        (require __DIR__.'/../database/migrations/add_sso_id_to_users_table.php.stub')->up();
+        $this->loadMigrationsFrom(__DIR__.'/database/migrations');
+        $this->loadPackageMigrations(SsoClientServiceProvider::class);
     }
 
     protected function getPackageProviders($app): array

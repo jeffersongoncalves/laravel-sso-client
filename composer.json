@@ -30,6 +30,7 @@
         "illuminate/support": "^12.0|^13.0"
     },
     "require-dev": {
+        "jeffersongoncalves/pest-plugin-database-migrations": "^1.0",
         "jeffersongoncalves/laravel-sso-server": "^1.1",
         "larastan/larastan": "^3.0",
         "laravel/pint": "^1.24",
