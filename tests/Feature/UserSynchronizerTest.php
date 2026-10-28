@@ -14,6 +14,9 @@ function synchronizeSso(array $claims = []): User
     return app(SsoUserSynchronizerContract::class)->synchronize(ssoClaims($claims));
 }
 
+// The legacy-mode tests null the column; the migration rollback at teardown reads it back.
+afterEach(fn () => config(['sso-client.user.sso_id_column' => 'sso_id']));
+
 it('creates a new user linked to the server sub', function (): void {
     $user = synchronizeSso();
 
